@@ -1,0 +1,206 @@
+## O Gerenciador de Catálogos da Netflix terá quatro Azure Functions interagindo com o Azure Storage Account e Azure CosmosDB.
+
+1️⃣ Criar a Infraestrutura no Azure
+2️⃣ Azure Function para salvar arquivos no Storage Account
+3️⃣ Azure Function para salvar registros no CosmosDB
+4️⃣ Azure Function para filtrar registros no CosmosDB
+5️⃣ Azure Function para listar registros no CosmosDB
+6️⃣ Configurar CI/CD no Azure DevOps
+
+1️⃣ Criando a Infraestrutura na Cloud
+Execute os comandos abaixo no Azure CLI para provisionar os recursos:
+
+# Criar Resource Group
+az group create --name az400resoucegroup --location eastus
+
+# Criar Storage Account
+az storage account create --name jsalesazstorage --resource-group az400resoucegroup --location eastus --sku Standard_LRS
+
+# Criar Conta do CosmosDB
+az cosmosdb create --name jsalesaz-cosmosdb --resource-group az400resoucegroup --kind MongoDB
+
+# Criar Database e Collection no CosmosDB
+az cosmosdb mongodb database create --account-name jsalesaz-cosmosdb --name NetflixDB --resource-group az400resoucegroup
+az cosmosdb mongodb collection create --account-name jsalesaz-cosmosdb --database-name NetflixDB --name Catalogos --resource-group az400resoucegroup
+
+# Criar Azure Function App para processar os arquivos e interagir com CosmosDB
+az functionapp create --name jsalesaz-dev001 --resource-group az400resoucegroup --storage-account jsalesazstorage --consumption-plan-location eastus --runtime dotnet-isolated --runtime-version 8
+
+2️⃣ Criando a Azure Function para Salvar Arquivos no Storage Account
+-Esta função receberá um arquivo de imagem e salvará no Azure Blob Storage.
+-Criar o projeto e a função
+
+mkdir NetflixCatalogManager
+cd NetflixCatalogManager
+func init --worker-runtime dotnet-isolated
+func new --name SalvarArquivo --template "HTTP trigger" --authlevel "anonymous"
+Código SalvarArquivo.cs
+csharp
+Copiar
+Editar
+using System;
+using System.IO;
+using System.Threading.Tasks;
+using Azure.Storage.Blobs;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Logging;
+using System.Net;
+
+public class SalvarArquivo
+{
+    private readonly ILogger _logger;
+
+    public SalvarArquivo(ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<SalvarArquivo>();
+    }
+
+    [Function("SalvarArquivo")]
+    public async Task<HttpResponseData> Run([HttpTrigger(AuthorizationLevel.Anonymous, "post")] HttpRequestData req)
+    {
+        var storageConnection = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
+        var blobServiceClient = new BlobServiceClient(storageConnection);
+        var containerClient = blobServiceClient.GetBlobContainerClient("catalogo-imagens");
+
+        await containerClient.CreateIfNotExistsAsync();
+
+        var fileName = $"{Guid.NewGuid()}.jpg";
+        var blobClient = containerClient.GetBlobClient(fileName);
+
+        using (var stream = new MemoryStream())
+        {
+            await req.Body.CopyToAsync(stream);
+            stream.Position = 0;
+            await blobClient.UploadAsync(stream, true);
+        }
+
+        var response = req.CreateResponse(HttpStatusCode.Created);
+        await response.WriteStringAsync($"Arquivo salvo: {fileName}");
+
+        return response;
+    }
+}
+
+3️⃣ Criando a Azure Function para Salvar Registros no CosmosDB
+- Essa função recebe um catálogo e o armazena no Azure CosmosDB.
+- Criar a função
+func new --name SalvarCatalogo --template "HTTP trigger" --authlevel "anonymous"
+
+- Código SalvarCatalogo.cs
+
+using System;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Logging;
+using System.Net;
+using Azure.Data.Cosmos;
+
+public class SalvarCatalogo
+{
+    private readonly ILogger _logger;
+    private readonly CosmosClient _cosmosClient;
+    private readonly CosmosContainer _container;
+
+    public SalvarCatalogo(ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<SalvarCatalogo>();
+        var connectionString = Environment.GetEnvironmentVariable("CosmosDBConnection");
+        _cosmosClient = new CosmosClient(connectionString);
+        _container = _cosmosClient.GetDatabase("NetflixDB").GetContainer("Catalogos");
+    }
+
+    [Function("SalvarCatalogo")]
+    public async Task<HttpResponseData> Run([HttpTrigger(AuthorizationLevel.Anonymous, "post")] HttpRequestData req)
+    {
+        var requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+        var catalogo = JsonSerializer.Deserialize<Catalogo>(requestBody);
+
+        catalogo.Id = Guid.NewGuid().ToString();
+        await _container.UpsertItemAsync(catalogo);
+
+        var response = req.CreateResponse(HttpStatusCode.Created);
+        await response.WriteStringAsync($"Catálogo salvo: {catalogo.Titulo}");
+
+        return response;
+    }
+}
+
+public class Catalogo
+{
+    public string Id { get; set; }
+    public string Titulo { get; set; }
+    public string Genero { get; set; }
+    public int AnoLancamento { get; set; }
+}
+
+4️⃣ Criando a Azure Function para Filtrar Registros no CosmosDB
+- Essa função busca catálogos filtrados por gênero.
+
+- Criar a função
+
+func new --name FiltrarCatalogo --template "HTTP trigger" --authlevel "anonymous"
+
+- Código FiltrarCatalogo.cs
+
+[Function("FiltrarCatalogo")]
+public async Task<HttpResponseData> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get")] HttpRequestData req)
+{
+    var genero = req.Query["genero"];
+    if (string.IsNullOrEmpty(genero))
+    {
+        var errorResponse = req.CreateResponse(HttpStatusCode.BadRequest);
+        await errorResponse.WriteStringAsync("O parâmetro 'genero' é obrigatório.");
+        return errorResponse;
+    }
+
+    var query = $"SELECT * FROM c WHERE c.Genero = '{genero}'";
+    var iterator = _container.GetItemQueryIterator<Catalogo>(query);
+    var resultados = await iterator.ReadNextAsync();
+
+    var response = req.CreateResponse(HttpStatusCode.OK);
+    await response.WriteStringAsync(JsonSerializer.Serialize(resultados));
+
+    return response;
+}
+
+5️⃣ Criando a Azure Function para Listar Registros no CosmosDB
+- Essa função retorna todos os catálogos cadastrados.
+- Criar a função
+
+func new --name ListarCatalogo --template "HTTP trigger" --authlevel "anonymous"
+
+- Código ListarCatalogo.cs
+
+[Function("ListarCatalogo")]
+public async Task<HttpResponseData> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get")] HttpRequestData req)
+{
+    var query = "SELECT * FROM c";
+    var iterator = _container.GetItemQueryIterator<Catalogo>(query);
+    var resultados = await iterator.ReadNextAsync();
+
+    var response = req.CreateResponse(HttpStatusCode.OK);
+    await response.WriteStringAsync(JsonSerializer.Serialize(resultados));
+
+    return response;
+}
+
+6️⃣ Deploy Automatizado com Azure DevOps
+- Crie um pipeline YAML no Azure DevOps para CI/CD.
+
+trigger:
+- main
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- task: AzureFunctionApp@1
+  displayName: 'Deploy para o Azure'
+  inputs:
+    azureSubscription: 'minha-conexao-azure'
+    appName: 'jsalesaz-dev001'
+    package: '$(Build.ArtifactStagingDirectory)/**/*.zip'

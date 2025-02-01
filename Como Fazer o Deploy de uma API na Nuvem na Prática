@@ -1,0 +1,86 @@
+## Visão Geral do Processo
+# Criar um Repositório no Azure DevOps
+
+# Código-fonte da API (.NET)
+# Arquivos de configuração
+# Configurar um Pipeline de CI/CD no Azure DevOps
+
+# CI (Continuous Integration): Compila e testa a API
+# CD (Continuous Deployment): Faz deploy para o Azure App Service ou Azure Function App
+# Publicar a API na Nuvem (Azure)
+
+## Escolher entre Azure App Service ou Azure Functions para hospedar a API
+
+## Criar um Projeto e Repositório no Azure DevOps
+-Vá para Azure DevOps
+-Crie um novo Projeto
+-No repositório, suba o código da sua API (.NET)
+-Configurar o Pipeline de CI/CD
+-Crie um arquivo azure-pipelines.yml na raiz do repositório:
+
+trigger:
+- main  # Roda o pipeline quando houver mudanças na branch main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  azureServiceConnection: 'minha-conexao-azure'
+  appName: 'jsalesaz-dev001' # Nome do App no Azure
+  resourceGroup: 'az400resoucegroup'
+
+steps:
+- task: UseDotNet@2
+  inputs:
+    packageType: 'sdk'
+    version: '8.x'
+    installationPath: $(Agent.ToolsDirectory)/dotnet
+
+- task: DotNetCoreCLI@2
+  displayName: 'Restaurar dependências'
+  inputs:
+    command: 'restore'
+    projects: '**/*.csproj'
+
+- task: DotNetCoreCLI@2
+  displayName: 'Compilar aplicação'
+  inputs:
+    command: 'build'
+    projects: '**/*.csproj'
+    arguments: '--configuration Release'
+
+- task: DotNetCoreCLI@2
+  displayName: 'Publicar aplicação'
+  inputs:
+    command: 'publish'
+    publishWebProjects: true
+    arguments: '--configuration Release --output $(Build.ArtifactStagingDirectory)'
+    zipAfterPublish: true
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Salvar build'
+  inputs:
+    pathToPublish: '$(Build.ArtifactStagingDirectory)'
+    artifactName: 'drop'
+
+- task: AzureFunctionApp@1
+  displayName: 'Deploy para o Azure'
+  inputs:
+    azureSubscription: $(azureServiceConnection)
+    appName: $(appName)
+    package: '$(Build.ArtifactStagingDirectory)/**/*.zip'
+
+## Configurar a Conexão com o Azure
+-No Azure DevOps, vá até Project Settings > Service Connections e crie uma conexão com o Azure
+-Dê permissão para essa conexão gerenciar os recursos do Azure
+
+## Executar o Pipeline
+-Vá até Pipelines > New Pipeline
+-Escolha Azure Repos Git
+-Selecione o repositório com o código da API
+-Escolha Existing Azure Pipelines YAML file e selecione azure-pipelines.yml
+-Salve e execute o pipeline 🚀
+
+## Testar a API na Nuvem
+- Após o deploy, obtenha a URL:
+az functionapp show --name jsalesaz-dev001 --resource-group az400resoucegroup --query defaultHostName --output tsv

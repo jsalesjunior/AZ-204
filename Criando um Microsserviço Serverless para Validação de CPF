@@ -1,0 +1,80 @@
+### Configuração no Azure CLI
+
+## Criar o Resource Group
+
+az group create --name az400resoucegroup --location eastus
+
+##  Criar o Azure Storage Account
+az storage account create --name jsalesazstorage --location eastus --resource-group az400resoucegroup --sku Standard_LRS
+
+## Criar o Azure Function App (.NET 8)
+
+az functionapp create --name jsalesaz-dev001 --resource-group az400resoucegroup --storage-account jsalesazstorage --consumption-plan-location eastus --runtime dotnet-isolated --runtime-version 8
+
+## Criando o Código do Microsserviço em .NET
+
+# Criar um projeto localmente
+mkdir ValidacaoCpfFunction
+cd ValidacaoCpfFunction
+func init --worker-runtime dotnet-isolated
+
+# Criar a Função HTTP Trigger
+func new --name ValidarCpf --template "HTTP trigger" --authlevel "anonymous"
+
+# Código para ValidarCpf.cs
+using System;
+using System.Text.RegularExpressions;
+using Microsoft.Azure.Functions.Worker;
+using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Logging;
+using System.Threading.Tasks;
+using System.Net;
+using System.Text.Json;
+
+public class ValidarCpf
+{
+    private readonly ILogger _logger;
+
+    public ValidarCpf(ILoggerFactory loggerFactory)
+    {
+        _logger = loggerFactory.CreateLogger<ValidarCpf>();
+    }
+
+    [Function("ValidarCpf")]
+    public async Task<HttpResponseData> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get")] HttpRequestData req)
+    {
+        string cpf = req.Query["cpf"];
+
+        if (string.IsNullOrEmpty(cpf))
+        {
+            var errorResponse = req.CreateResponse(HttpStatusCode.BadRequest);
+            await errorResponse.WriteStringAsync("Parâmetro 'cpf' é obrigatório.");
+            return errorResponse;
+        }
+
+        bool isValid = ValidarFormatoCpf(cpf);
+        var response = req.CreateResponse(HttpStatusCode.OK);
+        await response.WriteStringAsync(JsonSerializer.Serialize(new { cpf, valido = isValid }));
+        
+        return response;
+    }
+
+    private bool ValidarFormatoCpf(string cpf)
+    {
+        cpf = Regex.Replace(cpf, @"\D", ""); // Remove caracteres não numéricos
+        if (cpf.Length != 11 || new string(cpf[0], 11) == cpf) return false;
+
+        return true;
+    }
+}
+
+## Deploy no Azure
+# Fazer Login no Azure CLI
+az login
+
+## Publicar a Azure Function
+func azure functionapp publish jsalesaz-dev001
+
+## Testando a API
+# Após o deploy, pegue a URL base do Azure Functions:
+az functionapp show --name jsalesaz-dev001 --resource-group az400resoucegroup --query defaultHostName --output tsv
